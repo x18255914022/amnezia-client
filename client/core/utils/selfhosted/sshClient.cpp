@@ -1,6 +1,9 @@
 #include "sshClient.h"
 
+#include <QCryptographicHash>
+#include <QDir>
 #include <QEventLoop>
+#include <QStandardPaths>
 #include <QtConcurrent>
 
 #include <fstream>
@@ -10,6 +13,27 @@ const uint32_t S_IRWXU = 0644;
 #endif
 
 namespace libssh {
+    namespace {
+        // Per-application known hosts file. We pin the server host key on first
+        // use (TOFU) and refuse to connect when it changes afterwards, which
+        // protects the SSH session (and everything sent over it, including
+        // passwords and install scripts) from man-in-the-middle attackers.
+        QString knownHostsFilePath()
+        {
+            const QString dataDir = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
+            return QDir(dataDir).filePath(QStringLiteral("amnezia_known_hosts"));
+        }
+
+        // Normalized, stable identity of a host entry: [hostname]:port
+        QString hostEntryKey(const std::string &host, int port)
+        {
+            if (port == 22) {
+                return QString::fromStdString(host);
+            }
+            return QStringLiteral("[%1]:%2").arg(QString::fromStdString(host)).arg(port);
+        }
+    }  // namespace
+
     constexpr auto libsshTimeoutError{"Timeout connecting to"};
 
     std::function<QString()> Client::m_passphraseCallback;
@@ -48,6 +72,23 @@ namespace libssh {
             ssh_options_set(m_session, SSH_OPTIONS_USER, hostUsername.c_str());
             ssh_options_set(m_session, SSH_OPTIONS_LOG_VERBOSITY, &logVerbosity);
 
+            // Always verify the server identity against our own known-hosts
+            // file. libssh won't silently accept unknown keys when a
+            // UserKnownHostsFile is configured and strict checking is on.
+            const QString hostsFile = knownHostsFilePath();
+            if (!QFileInfo::exists(hostsFile)) {
+                QDir().mkpath(QFileInfo(hostsFile).absolutePath());
+                QFile::create(hostsFile);
+#ifdef Q_OS_UNIX
+                ::chmod(hostsFile.toStdString().c_str(), S_IRUSR | S_IWUSR);
+#endif
+            }
+            ssh_options_set(m_session, SSH_OPTIONS_HOSTKEYS, "ssh-ed25519,ecdsa-sha2-nistp256,rsa-sha2-512,rsa-sha2-256,ssh-rsa");
+            ssh_options_set(m_session, SSH_OPTIONS_KNOWNHOSTS, hostsFile.toStdString().c_str());
+            long options = SSH_VERIFY;
+            ssh_options_set(m_session, SSH_OPTIONS_GLOBAL_KNOWNHOSTS, nullptr);
+            ssh_options_set(m_session, SSH_OPTIONS_STRICTHOSTKEYCHECK, &options);
+
             QFutureWatcher<int> watcher;
             QFuture<int> future = QtConcurrent::run([this]() {
                 return ssh_connect(m_session);
@@ -62,6 +103,16 @@ namespace libssh {
 
             if (connectionResult != SSH_OK) {
                 return fromLibsshErrorCode();
+            }
+
+            // Enforce TOFU pinning of the server host key:
+            // - first connection to this host:pin the key and continue;
+            // - key matches the pinned one:continue;
+            // - key differs from the pinned one:refuse to connect (possible MITM).
+            ErrorCode hostKeyError = verifyAndPinHostKey(hostIp, port);
+            if (hostKeyError != ErrorCode::NoError) {
+                disconnectFromHost();
+                return hostKeyError;
             }
 
             std::string authUsername = credentials.userName.toStdString();
@@ -115,6 +166,70 @@ namespace libssh {
             }
             ssh_free(m_session);
             m_session = nullptr;
+        }
+    }
+
+    ErrorCode Client::verifyAndPinHostKey(const std::string &host, int port)
+    {
+        ssh_key serverKey = nullptr;
+        if (ssh_get_server_publickey(m_session, &serverKey) != SSH_OK) {
+            return ErrorCode::SshInternalError;
+        }
+        std::unique_ptr<ssh_key_struct, decltype(&ssh_key_free)> keyGuard(serverKey, ssh_key_free);
+
+        unsigned char *hashRaw = nullptr;
+        size_t hashSize = 0;
+        if (ssh_get_publickey_hash(keyGuard.get(), SSH_PUBLICKEY_HASH_SHA256, &hashRaw, &hashSize) != SSH_OK) {
+            return ErrorCode::SshInternalError;
+        }
+        std::unique_ptr<unsigned char, decltype(&ssh_clean_pubkey_hash)> hashGuard(hashRaw, ssh_clean_pubkey_hash);
+
+        const QString hostId = hostEntryKey(host, port);
+        const QByteArray newFingerprint = QByteArray(reinterpret_cast<const char *>(hashRaw), static_cast<int>(hashSize)).toHex();
+
+        // Our own per-app pin store survives even if the known-hosts file is
+        // deleted or tampered with.
+        const auto storedIt = m_pinnedHostKeys.constFind(hostId);
+        if (storedIt != m_pinnedHostKeys.constEnd()) {
+            if (storedIt.value() != newFingerprint) {
+                qCritical() << "SECURITY: server host key changed for" << hostId << "- possible man-in-the-middle attack";
+                return ErrorCode::SshHostKeyChangedError;
+            }
+            return ErrorCode::NoError;
+        }
+
+        ssh_known_hosts states = nullptr;
+        if (ssh_get_known_hosts_state(m_session, false, &states) != SSH_OK) {
+            qWarning() << "Failed to read known hosts state";
+            return ErrorCode::SshInternalError;
+        }
+        std::unique_ptr<ssh_known_hosts_struct, decltype(&ssh_known_hosts_free)> statesGuard(states, ssh_known_hosts_free);
+
+        switch (ssh_get_known_hosts_entry(states)) {
+        case SSH_KNOWN_HOSTS_OK: {
+            // Matches our app-level known hosts file: pin it in memory too.
+            m_pinnedHostKeys.insert(hostId, newFingerprint);
+            return ErrorCode::NoError;
+        }
+        case SSH_KNOWN_HOSTS_NOT_FOUND:
+        case SSH_KNOWN_HOSTS_UNKNOWN: {
+            // Trust on first use: persistently pin the key.
+            if (ssh_update_known_hosts_file(hostId.toUtf8().constData(), keyGuard.get()) != SSH_OK) {
+                qWarning() << "Failed to write the pinned host key to the known hosts file:" << ssh_get_error(m_session);
+            }
+            m_pinnedHostKeys.insert(hostId, newFingerprint);
+            return ErrorCode::NoError;
+        }
+        case SSH_KNOWN_HOSTS_CHANGED: {
+            qCritical() << "SECURITY: server host key changed for" << hostId << "- possible man-in-the-middle attack";
+            return ErrorCode::SshHostKeyChangedError;
+        }
+        case SSH_KNOWN_HOSTS_OTHER: {
+            qCritical() << "SECURITY: server offered a different host key type than pinned for" << hostId;
+            return ErrorCode::SshHostKeyChangedError;
+        }
+        default:
+            return ErrorCode::SshInternalError;
         }
     }
 

@@ -18,6 +18,10 @@ class Utils : public QObject
 public:
     static QString getRandomString(int len);
     static QString SafeBase64Decode(QString string);
+    // Validates a value that is going to be interpolated into a remote shell
+    // command (client/certificate ids, container names, etc.). Only characters
+    // that are safe inside single-quoted shell strings and paths are allowed.
+    static bool isSafeShellToken(const QString &value);
     static QString VerifyJsonString(const QString &source);
     static QString JsonToString(const QJsonObject &json, QJsonDocument::JsonFormat format);
     static QString JsonToString(const QJsonArray &array, QJsonDocument::JsonFormat format);
