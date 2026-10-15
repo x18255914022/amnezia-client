@@ -324,6 +324,25 @@ bool Utils::signalCtrl(DWORD dwProcessId, DWORD dwCtrlEvent)
 
 #endif
 
+bool Utils::isSafeShellToken(const QString &value)
+{
+    // Reject empty values and anything that could break out of a single-quoted
+    // shell string or act as a path traversal / command separator.
+    // Allowed: letters, digits, '_', '-', '.', ':' and '/' (paths).
+    if (value.isEmpty()) {
+        return false;
+    }
+    static const QRegularExpression re(QStringLiteral("^[A-Za-z0-9_.:/-]+$"));
+    if (!re.match(value).hasMatch()) {
+        return false;
+    }
+    // Disallow parent directory traversal sequences in path-like tokens.
+    if (value.contains(QStringLiteral(".."))) {
+        return false;
+    }
+    return true;
+}
+
 void Utils::logException(const std::exception &e)
 {
     qCritical() << e.what();

@@ -15,6 +15,7 @@
 #include "core/protocols/protocolUtils.h"
 #include "core/utils/constants/configKeys.h"
 #include "core/utils/constants/protocolConstants.h"
+#include "core/utils/utilities.h"
 #include "core/models/containerConfig.h"
 
 using namespace amnezia;
@@ -564,6 +565,12 @@ ErrorCode UsersController::revokeOpenVpn(const int row, const DockerContainer co
     auto client = clientsTable.at(row).toObject();
     QString clientId = client.value(configKey::clientId).toString();
 
+    // Prevent shell command injection into the remote easyrsa script.
+    if (!Utils::isSafeShellToken(clientId)) {
+        logger.error() << "Invalid client id in revokeOpenVpn";
+        return ErrorCode::InternalError;
+    }
+
     const QString getOpenVpnCertData = QString("sudo docker exec -i $CONTAINER_NAME bash -c '"
                                                "cd /opt/amnezia/openvpn ;\\"
                                                "easyrsa revoke %1 ;\\"
@@ -654,6 +661,12 @@ ErrorCode UsersController::revokeWireGuard(const int row, const DockerContainer 
     bool isAwg2 = (container == DockerContainer::Awg2);
     QString command = isAwg2 ? QStringLiteral("awg") : QStringLiteral("wg");
     QString iface   = isAwg2 ? QStringLiteral("awg0") : QStringLiteral("wg0");
+    // Defense in depth: configPath is a compile-time constant, but never pass
+    // unvalidated strings into the remote bash command.
+    if (!Utils::isSafeShellToken(configPath)) {
+        logger.error() << "Invalid config path in revokeWireGuard";
+        return ErrorCode::InternalError;
+    }
     QString script  = QString(
         "sudo docker exec -i $CONTAINER_NAME bash -c '%1 syncconf %2 <(%1-quick strip %3)'"
     ).arg(command, iface, configPath);

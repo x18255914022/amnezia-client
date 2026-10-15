@@ -17,7 +17,7 @@
 #  include <sys/types.h>
 #  include <unistd.h>
 
-constexpr const char* TMP_PATH = "/tmp/amneziavpn.socket";
+
 constexpr const char* VAR_PATH = "/var/run/amneziavpn/daemon.socket";
 #endif
 
@@ -32,9 +32,17 @@ DaemonLocalServer::DaemonLocalServer(QObject* parent) : QObject(parent) {
 DaemonLocalServer::~DaemonLocalServer() { MZ_COUNT_DTOR(DaemonLocalServer); }
 
 bool DaemonLocalServer::initialize() {
-  m_server.setSocketOptions(QLocalServer::WorldAccessOption);
+  // SECURITY: do not grant world access to the daemon socket. The daemon
+  // performs privileged network operations as root; arbitrary local processes
+  // must not be able to drive it. Only the trusted desktop client connects,
+  // and the socket lives in a restricted directory (see daemonPath()).
+  m_server.setSocketOptions(QLocalServer::UserAccessOption);
 
   QString path = daemonPath();
+  if (path.isEmpty()) {
+    logger.error() << "No secure daemon socket path available";
+    return false;
+  }
   logger.debug() << "Server path:" << path;
 
   if (QFileInfo::exists(path)) {
@@ -45,6 +53,13 @@ bool DaemonLocalServer::initialize() {
     logger.error() << "Failed to listen the daemon path";
     return false;
   }
+
+#if defined(MZ_LINUX) || defined(MZ_MACOS)
+  // Restrict the socket file itself to the owner (root).
+  if (chmod(path.toLocal8Bit().constData(), S_IRUSR | S_IWUSR) < 0) {
+    logger.warning() << "Failed to set permissions on the daemon socket";
+  }
+#endif
 
   connect(&m_server, &QLocalServer::newConnection, [&] {
     logger.debug() << "New connection received";
@@ -70,26 +85,32 @@ QString DaemonLocalServer::daemonPath() const {
   return "\\\\.\\pipe\\amneziavpn";
 #endif
 #if defined(MZ_MACOS) || defined(MZ_LINUX)
+  // SECURITY: never expose the control socket in a world-writable location
+  // such as /tmp: any local user could connect to it and drive the root
+  // daemon (install/remove VPN tunnels, modify routing). The daemon runs as
+  // root and cannot know the uid of the desktop user that connects, so the
+  // only safe location is a root-owned directory with restricted access.
   QDir dir("/var/run");
   if (!dir.exists()) {
-    logger.warning() << "/var/run doesn't exist. Fallback /tmp.";
-    return TMP_PATH;
+    logger.error() << "/var/run doesn't exist; the daemon socket path is not"
+                   << "available. Refusing to fall back to an insecure /tmp"
+                   << "socket.";
+    return QString();
   }
 
-  if (dir.exists("amneziavpn")) {
-    logger.debug() << "/var/run/amneziavpn seems to be usable";
-    return VAR_PATH;
+  if (!dir.exists("amneziavpn")) {
+    if (!dir.mkdir("amneziavpn")) {
+      logger.error() << "Failed to create /var/run/amneziavpn";
+      return QString();
+    }
   }
 
-  if (!dir.mkdir("amneziavpn")) {
-    logger.warning() << "Failed to create /var/run/amneziavpn";
-    return TMP_PATH;
-  }
-
-  if (chmod("/var/run/amneziavpn", S_IRWXU | S_IRWXG | S_IRWXO) < 0) {
+  // Root-owned, not group/other writable. Do NOT widen this to world-access:
+  // connections are accepted from the desktop client process only.
+  if (chmod("/var/run/amneziavpn", S_IRWXU | S_IXGRP | S_IXOTH) < 0) {
     logger.warning()
         << "Failed to set the right permissions to /var/run/amneziavpn";
-    return TMP_PATH;
+    return QString();
   }
 
   return VAR_PATH;
