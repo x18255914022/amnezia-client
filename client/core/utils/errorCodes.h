@@ -56,6 +56,10 @@ namespace amnezia
         SshPrivateKeyError = 303,
         SshPrivateKeyFormatError = 304,
         SshTimeoutError = 305,
+        // The server host key doesn't match the key stored on first use
+        // (possible man-in-the-middle attack) or is not yet trusted.
+        SshHostKeyChangedError = 306,
+        SshHostKeyNotTrustedError = 307,
 
         // Ssh scp errors
         SshScpFailureError = 400,

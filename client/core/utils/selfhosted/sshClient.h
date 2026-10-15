@@ -3,10 +3,14 @@
 
 #include <QObject>
 #include <QFile>
+#include <QHash>
 
 #include <fcntl.h>
+#include <memory>
 
 #include <libssh/libssh.h>
+#include <libssh/kex.h>
+#include <libssh/session.h>
 
 #include "core/utils/errorCodes.h"
 #include "core/utils/routeModes.h"
@@ -44,11 +48,18 @@ namespace libssh {
         void closeScpSession();
         ErrorCode fromLibsshErrorCode();
         ErrorCode fromFileErrorCode(QFileDevice::FileError fileError);
+        // Trust-on-first-use verification of the server host key against the
+        // app's own known hosts store. Returns NoError only when the key is
+        // newly pinned or matches the previously pinned one.
+        ErrorCode verifyAndPinHostKey(const std::string &host, int port);
         static int callback(const char *prompt, char *buf, size_t len, int echo, int verify, void *userdata);
 
         ssh_session m_session = nullptr;
         ssh_channel m_channel = nullptr;
         ssh_scp m_scpSession = nullptr;
+
+        // Pinned SHA256 fingerprints of server host keys ("host:port" -> hex).
+        QHash<QString, QByteArray> m_pinnedHostKeys;
 
         static std::function<QString()> m_passphraseCallback;
     signals:
