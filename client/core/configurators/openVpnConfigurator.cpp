@@ -218,6 +218,11 @@ ProtocolConfig OpenVpnConfigurator::processConfigWithExportSettings(const Export
 ErrorCode OpenVpnConfigurator::signCert(DockerContainer container, const ServerCredentials &credentials, 
                                         const DnsSettings &dnsSettings, QString clientId)
 {
+    // Prevent shell command injection into the remote easyrsa scripts.
+    if (!Utils::isSafeShellToken(clientId)) {
+        return ErrorCode::InternalError;
+    }
+
     QString script_import = QString("sudo docker exec -i %1 bash -c \"cd /opt/amnezia/openvpn && "
                                     "easyrsa import-req %2/%3.req %3\"")
                                     .arg(ContainerUtils::containerToString(container))
