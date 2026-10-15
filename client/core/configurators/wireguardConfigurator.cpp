@@ -196,6 +196,12 @@ WireguardConfigurator::ConnectionData WireguardConfigurator::prepareWireguardCon
     bool isAwg = (container == DockerContainer::Awg2);
     QString bin = isAwg ? QStringLiteral("awg") : QStringLiteral("wg");
     QString iface = isAwg ? QStringLiteral("awg0") : QStringLiteral("wg0");
+    // Defense in depth: never interpolate unvalidated strings into the remote
+    // bash command.
+    if (!Utils::isSafeShellToken(configPath)) {
+        errorCode = ErrorCode::InternalError;
+        return connData;
+    }
     QString script = QString(
         "sudo docker exec -i $CONTAINER_NAME bash -c '%1 syncconf %2 <(%1-quick strip %3)'").arg(bin, iface, configPath);
 
