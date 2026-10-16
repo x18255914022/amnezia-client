@@ -36,6 +36,7 @@
 #include "serialization.h"
 
 #include <QUrlQuery>
+#include <QUuid>
 
 #define OUTBOUND_TAG_PROXY "PROXY"
 
@@ -44,7 +45,10 @@ namespace amnezia::serialization::vmess_new
 const static QStringList NetworkType{ "tcp", "http", "ws", "kcp", "quic", "grpc" };
 const static QStringList QuicSecurityTypes{ "none", "aes-128-gcm", "chacha20-poly1305" };
 const static QStringList QuicKcpHeaderTypes{ "none", "srtp", "utp", "wechat-video", "dtls", "wireguard" };
-const static QStringList FalseTypes{ "false", "False", "No", "Off", "0" };
+const static QStringList TcpHeaderTypes{ "none", "srtp", "utp", "wechat-video", "dtls", "wireguard", "http" };
+// Allow-list: TLS certificate verification is disabled ONLY for explicitly truthy values.
+// Anything else (including typos like "FALSE", "no", "0") keeps verification enabled (fail-closed).
+const static QStringList TrueTypes{ "true", "1", "yes", "y" };
 
 QJsonObject Deserialize(const QString &vmessStr, QString *alias, QString *errMessage)
 {
@@ -70,13 +74,15 @@ QJsonObject Deserialize(const QString &vmessStr, QString *alias, QString *errMes
     bool tls = false;
     // Check streamSettings
     {
+        QString netRaw;
         for (const auto &_protocol : url.userName().split("+"))
         {
-            if (_protocol == "tls")
+            if (_protocol.compare("tls", Qt::CaseInsensitive) == 0)
                 tls = true;
             else
-                net = _protocol;
+                netRaw = _protocol;
         }
+        net = netRaw.trimmed().toLower();
         if (!NetworkType.contains(net))
         {
             *errMessage = QObject::tr("Invalid streamSettings protocol: ") + net;
@@ -88,14 +94,44 @@ QJsonObject Deserialize(const QString &vmessStr, QString *alias, QString *errMes
     // Host Port UUID AlterID
     {
         const auto host = url.host();
+        if (host.isEmpty())
+        {
+            *errMessage = QObject::tr("vmess:// link has no host");
+            return default;
+        }
+
         int port = url.port();
+        if (port < 1 || port > 65535)
+        {
+            *errMessage = QObject::tr("Invalid port: ") + QString::number(port);
+            return default;
+        }
+
         QString uuid;
-        int aid;
+        int aid = 0;
         {
             const auto pswd = url.password();
             const auto index = pswd.lastIndexOf("-");
-            uuid = pswd.mid(0, index);
-            aid = pswd.right(pswd.length() - index - 1).toInt();
+            if (index < 0)
+            {
+                *errMessage = QObject::tr("Invalid vmess:// userinfo: missing alterId");
+                return default;
+            }
+            uuid = pswd.mid(0, index).trimmed();
+
+            bool aidOk = false;
+            aid = pswd.mid(index + 1).toInt(&aidOk);
+            if (!aidOk || aid < 0 || aid > 64)
+            {
+                *errMessage = QObject::tr("Invalid alterId");
+                return default;
+            }
+
+            if (QUuid(uuid).isNull())
+            {
+                *errMessage = QObject::tr("Invalid user ID (UUID): ") + uuid;
+                return default;
+            }
         }
         server.address = host;
         server.port = port;
@@ -105,10 +141,14 @@ QJsonObject Deserialize(const QString &vmessStr, QString *alias, QString *errMes
     }
 
     const auto getQueryValue = [&query](const QString &key, const QString &defaultValue) {
-        if (query.hasQueryItem(key))
-            return query.queryItemValue(key, QUrl::FullyDecoded);
-        else
-            return defaultValue;
+        // Case-insensitive lookup: some generators use different letter casing in query keys.
+        const auto items = query.queryItems(QUrl::FullyDecoded);
+        for (const auto &item : items)
+        {
+            if (item.first.compare(key, Qt::CaseInsensitive) == 0)
+                return item.second;
+        }
+        return defaultValue;
     };
 
     //
@@ -116,7 +156,13 @@ QJsonObject Deserialize(const QString &vmessStr, QString *alias, QString *errMes
     {
         if (net == "tcp")
         {
-            stream.tcpSettings.header.type = getQueryValue("type", "none");
+            const auto headerType = getQueryValue("type", "none");
+            if (!TcpHeaderTypes.contains(headerType, Qt::CaseInsensitive))
+            {
+                *errMessage = QObject::tr("Invalid tcp header type: ") + headerType;
+                return default;
+            }
+            stream.tcpSettings.header.type = headerType;
         }
         else if (net == "http")
         {
@@ -131,13 +177,31 @@ QJsonObject Deserialize(const QString &vmessStr, QString *alias, QString *errMes
         else if (net == "kcp")
         {
             stream.kcpSettings.seed = getQueryValue("seed", "");
-            stream.kcpSettings.header.type = getQueryValue("type", "none");
+            const auto headerType = getQueryValue("type", "none");
+            if (!QuicKcpHeaderTypes.contains(headerType, Qt::CaseInsensitive))
+            {
+                *errMessage = QObject::tr("Invalid kcp header type: ") + headerType;
+                return default;
+            }
+            stream.kcpSettings.header.type = headerType;
         }
         else if (net == "quic")
         {
-            stream.quicSettings.security = getQueryValue("security", "none");
+            const auto security = getQueryValue("security", "none");
+            if (!QuicSecurityTypes.contains(security, Qt::CaseInsensitive))
+            {
+                *errMessage = QObject::tr("Invalid quic security type: ") + security;
+                return default;
+            }
+            const auto headerType = getQueryValue("type", "none");
+            if (!QuicKcpHeaderTypes.contains(headerType, Qt::CaseInsensitive))
+            {
+                *errMessage = QObject::tr("Invalid quic header type: ") + headerType;
+                return default;
+            }
+            stream.quicSettings.security = security;
             stream.quicSettings.key = getQueryValue("key", "");
-            stream.quicSettings.header.type = getQueryValue("type", "none");
+            stream.quicSettings.header.type = headerType;
         }
         else if (net == "grpc")
         {
@@ -152,7 +216,8 @@ QJsonObject Deserialize(const QString &vmessStr, QString *alias, QString *errMes
 #undef default
     if (tls)
     {
-        stream.tlsSettings.allowInsecure = !FalseTypes.contains(getQueryValue("allowInsecure", "false"));
+        // Fail-closed: certificate verification stays enabled unless the value is explicitly truthy.
+        stream.tlsSettings.allowInsecure = TrueTypes.contains(getQueryValue("allowInsecure", "false").trimmed().toLower());
         stream.tlsSettings.serverName = getQueryValue("tlsServerName", "");
     }
     QJsonObject root;
