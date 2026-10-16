@@ -343,6 +343,16 @@ bool Utils::isSafeShellToken(const QString &value)
     return true;
 }
 
+QString Utils::shellQuote(const QString &value)
+{
+    // Standard POSIX single-quote escaping: wrap the string in single quotes
+    // and replace every embedded single quote with '\''.  This is safe for
+    // any byte sequence, including newlines and backslashes.
+    QString escaped = value;
+    escaped.replace(QLatin1Char('\''), QStringLiteral("'\\''"));
+    return QLatin1Char('\'') + escaped + QLatin1Char('\'');
+}
+
 void Utils::logException(const std::exception &e)
 {
     qCritical() << e.what();

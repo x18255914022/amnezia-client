@@ -15,6 +15,7 @@
 #include "core/models/protocols/xrayProtocolConfig.h"
 #include "core/utils/containerEnum.h"
 #include "core/utils/containers/containerUtils.h"
+#include "core/utils/utilities.h"
 #include "core/utils/protocolEnum.h"
 #include "core/utils/selfhosted/sshSession.h"
 #include "core/installers/awgInstaller.h"
@@ -1987,6 +1988,10 @@ ErrorCode InstallController::setDockerContainerEnabledState(const QString &serve
         return ErrorCode::InternalError;
     }
     const QString containerName = ContainerUtils::containerToString(container);
+    // Never interpolate unvalidated strings into remote shell commands.
+    if (!Utils::isSafeShellToken(containerName)) {
+        return ErrorCode::InternalError;
+    }
     SshSession sshSession;
     const QString script = enabled ? QStringLiteral("sudo docker start %1").arg(containerName)
                                    : QStringLiteral("sudo docker stop %1").arg(containerName);
@@ -2025,6 +2030,10 @@ ErrorCode InstallController::queryDockerContainerStatus(const QString &serverId,
         return ErrorCode::InternalError;
     }
     const QString containerName = ContainerUtils::containerToString(container);
+    // Never interpolate unvalidated strings into remote shell commands.
+    if (!Utils::isSafeShellToken(containerName)) {
+        return {};
+    }
     QString stdOut;
     auto cbReadStdOut = [&](const QString &data, libssh::Client &) {
         stdOut += data;
