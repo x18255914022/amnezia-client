@@ -106,10 +106,12 @@ void LocalSocketController::initializeInternal() {
 #ifdef MZ_WINDOWS
   QString path = "\\\\.\\pipe\\amneziavpn";
 #else
+  // SECURITY: removed the old fallback to the world-writable
+  // /tmp/amneziavpn.socket. That path could be pre-created or sniffed by any
+  // local user, giving access to the root daemon (tunnel install/removal,
+  // routing changes). The daemon now only listens on the restricted
+  // /var/run/amneziavpn socket; connecting elsewhere is refused.
   QString path = "/var/run/amneziavpn/daemon.socket";
-  if (!QFileInfo::exists(path)) {
-    path = "/tmp/amneziavpn.socket";
-  }
 #endif
 
   logger.debug() << "Connecting to:" << path;

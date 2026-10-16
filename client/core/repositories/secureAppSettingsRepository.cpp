@@ -17,7 +17,10 @@
 using namespace amnezia;
 
 namespace {
-    constexpr char gatewayEndpoint[] = "http://gw.amnezia.org:80/";
+    // SECURITY: the gateway endpoint carries API keys and user config; it
+    // must never be fetched over cleartext HTTP. Use HTTPS on the default
+    // port so TLS validation applies and credentials are encrypted in transit.
+    constexpr char gatewayEndpoint[] = "https://gw.amnezia.org/";
 }
 
 SecureAppSettingsRepository::SecureAppSettingsRepository(SecureQSettings* settings, QObject *parent)

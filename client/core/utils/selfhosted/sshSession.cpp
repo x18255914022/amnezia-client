@@ -81,7 +81,13 @@ ErrorCode SshSession::runScript(const ServerCredentials &credentials, QString sc
             continue;
         }
 
+        // Security: remote install scripts may embed secrets (private keys,
+        // passwords, MTProxy secrets after variable substitution). Never write
+        // raw command lines to the log; only a debug build with an explicitly
+        // defined QDEBUG_VERBOSE_LOG_ENABLED macro may do so.
+#ifdef QDEBUG_VERBOSE_LOG_ENABLED
         qDebug().noquote() << lineToExec;
+#endif
 
         error = m_sshClient.executeCommand(lineToExec, cbReadStdOut, cbReadStdErr);
         if (error != ErrorCode::NoError) {

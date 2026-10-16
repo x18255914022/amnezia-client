@@ -1720,27 +1720,45 @@ ErrorCode InstallController::mountSftpDrive(const ServerCredentials &credentials
 
     process->setProgram(cmd);
 
-    QString args = QString("%1@%2:/ %3 "
-                           "-o port=%4 "
-                           "-f "
-                           "-o reconnect "
-                           "-o rellinks "
-                           "-o fstypename=SSHFS "
-                           "-o ssh_command=/usr/bin/ssh.exe "
-                           "-o UserKnownHostsFile=/dev/null "
-                           "-o StrictHostKeyChecking=no "
-                           "-o password_stdin")
-                           .arg(username, hostname, mountPath, port);
+    // SECURITY: previously this mounted with
+    //   -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no
+    // which silently accepted any host key and made the SFTP session (and the
+    // password sent through stdin) trivially hijackable via MITM. We now use
+    // the application's pinned known_hosts file maintained by SshClient
+    // (TOFU pinning) and require strict host key checking.
+    const QString knownHostsFile =
+        QDir(QStandardPaths::writableLocation(QStandardPaths::AppDataLocation))
+            .filePath("amnezia_known_hosts");
 
-    process->setArguments(args.split(" ", Qt::SkipEmptyParts));
+    QStringList args;
+    args << QString("%1@%2:/").arg(username, hostname);
+    args << mountPath;
+    args << "-o" << QString("port=%1").arg(port);
+    args << "-f";
+    args << "-o" << "reconnect";
+    args << "-o" << "rellinks";
+    args << "-o" << "fstypename=SSHFS";
+    // Password is fed to sshfs via stdin (no /tmp askpass file), the buffer
+    // holding it is wiped immediately after writing.
+    args << "-o" << "password_stdin";
+    args << "-o" << QString("UserKnownHostsFile=%1").arg(knownHostsFile);
+    args << "-o" << "StrictHostKeyChecking=yes";
+
+    process->setArguments(args);
     process->start();
     process->waitForStarted(50);
     if (process->state() != QProcess::Running) {
         qDebug() << "mountSftpDrive process not started";
-        qDebug() << args;
+        // Never log the full argument line: it contains server paths and may
+        // be extended with sensitive data in the future.
+        qWarning() << "mountSftpDrive failed to start sshfs for" << hostname;
         return ErrorCode::ServerContainerMissingError;
     } else {
-        process->write((password + "\n").toUtf8());
+        QByteArray pw = (password + "\n").toUtf8();
+        process->write(pw);
+        // Wipe the plaintext password from our own buffer as soon as it has
+        // been handed to sshfs over stdin.
+        pw.fill('\0');
     }
 
     m_sftpMountProcesses.append(process);
@@ -1780,7 +1798,9 @@ void InstallController::updateContainerConfigAfterInstallation(DockerContainer c
         }
     } else if (container == DockerContainer::MtProxy) {
         if (auto* mtProxyConfig = containerConfig.getMtProxyProtocolConfig()) {
-            qDebug() << "amnezia mtproxy" << stdOut;
+            // SECURITY: do not dump the raw mtproxy output to the log - it
+            // contains the proxy secret and invite links, which grant full
+            // use of the proxy to anyone with access to the log file.
 
             static const QRegularExpression reSecret(
                     QStringLiteral(R"(\[\*\]\s+Secret:\s+([0-9a-fA-F]{32}))"),
@@ -1805,7 +1825,8 @@ void InstallController::updateContainerConfigAfterInstallation(DockerContainer c
         }
     } else if (container == DockerContainer::Telemt) {
         if (auto *telemtConfig = containerConfig.getTelemtProtocolConfig()) {
-            qDebug() << "amnezia-telemt configure stdout" << stdOut;
+            // SECURITY: same as MtProxy above - the raw output contains the
+            // proxy secret and invite links and must not reach the logs.
 
             static const QRegularExpression reSecret(
                     QStringLiteral(R"(\[\*\]\s+Secret:\s+([0-9a-fA-F]{32}))"),

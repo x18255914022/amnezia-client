@@ -13,6 +13,12 @@
 #include <QString>
 #include <QStringList>
 
+#if !defined(Q_OS_WIN)
+#  include <sys/stat.h>
+#  include <cstring>
+#  include <cerrno>
+#endif
+
 #include "logger.h"
 #include "router.h"
 #include "killswitch.h"
@@ -38,20 +44,46 @@ int IpcServer::createPrivilegedProcess()
 
     ProcessDescriptor pd(this);
 
-    pd.localServer->setSocketOptions(QLocalServer::WorldAccessOption);
-
     if (!pd.localServer->listen(amnezia::getIpcProcessUrl(m_localpid))) {
         qDebug() << QString("Unable to start the server: %1.").arg(pd.localServer->errorString());
         return -1;
     }
 
+#if !defined(Q_OS_WIN)
+    // SECURITY: same policy as the main service endpoint - no world-writable
+    // socket files; per-process endpoints live in the abstract namespace on
+    // Linux and are chmod'ed to 0600 on macOS.
+    const QByteArray procPath = amnezia::getIpcProcessPath(m_localpid).toLocal8Bit();
+    if (!procPath.startsWith('@') &&
+        chmod(procPath.constData(), S_IRUSR | S_IWUSR) < 0) {
+        qDebug() << "Failed to restrict permissions on the IPC process socket:"
+                 << strerror(errno);
+    }
+#endif
+
     // Make sure any connections are handed to QtRO
     QObject::connect(pd.localServer.data(), &QLocalServer::newConnection, this, [pd]() {
+#if !defined(Q_OS_WIN)
+        while (QLocalSocket *pending = pd.localServer->nextPendingConnection()) {
+            if (!amnezia::peerCredentialsAllowed(pending->socketDescriptor())) {
+                qWarning() << "Rejected privileged-process IPC connection from unprivileged peer";
+                pending->disconnectFromServer();
+                pending->deleteLater();
+                continue;
+            }
+            qDebug() << "IpcServer new connection";
+            if (pd.serverNode) {
+                pd.serverNode->addHostSideConnection(pending);
+                pd.serverNode->enableRemoting(pd.ipcProcess.data());
+            }
+        }
+#else
         qDebug() << "IpcServer new connection";
         if (pd.serverNode) {
             pd.serverNode->addHostSideConnection(pd.localServer->nextPendingConnection());
             pd.serverNode->enableRemoting(pd.ipcProcess.data());
         }
+#endif
     });
 
     QObject::connect(pd.serverNode.data(), &QRemoteObjectHost::error, this,

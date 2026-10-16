@@ -5,6 +5,7 @@
 #include <QString>
 #include <QRegularExpression>
 #include <QSet>
+#include <QStandardPaths>
 
 #include "../client/core/utils/utilities.h"
 
@@ -38,11 +39,42 @@ inline QString permittedProcessPath(PermittedProcess pid)
 }
 
 
+// SECURITY: the privileged service used to expose its Qt Remote Objects IPC
+// endpoints as plain socket files inside the world-writable /tmp directory.
+// Any local process could pre-create or connect to those paths and drive the
+// root service (VPN tunnelling, firewall, routing changes). On Linux we now
+// use *abstract* namespace sockets (no filesystem entry, cannot be hijacked
+// via /tmp races) and additionally verify peer credentials of every incoming
+// connection (see amnezia::peerCredentialsAllowed).
+inline QString getIpcServicePath() {
+#ifdef Q_OS_WIN
+    return IPC_SERVICE_URL;
+#elif defined(Q_OS_LINUX)
+    // Leading '@' selects the abstract socket namespace on Linux.
+    return QString("@%1").arg(IPC_SERVICE_URL);
+#else
+    return QString("%1/AmneziaVpnIpcInterface")
+        .arg(QStandardPaths::writableLocation(QStandardPaths::GenericDataLocation));
+#endif
+}
+
 inline QString getIpcServiceUrl() {
 #ifdef Q_OS_WIN
     return IPC_SERVICE_URL;
 #else
-    return QString("/tmp/%1").arg(IPC_SERVICE_URL);
+    return "local:" + getIpcServicePath();
+#endif
+}
+
+inline QString getIpcProcessPath(int pid) {
+#ifdef Q_OS_WIN
+    return QString("%1_%2").arg(IPC_SERVICE_URL).arg(pid);
+#elif defined(Q_OS_LINUX)
+    return QString("@%1_%2").arg(IPC_SERVICE_URL).arg(pid);
+#else
+    return QString("%1/AmneziaVpnIpcInterface_%2")
+        .arg(QStandardPaths::writableLocation(QStandardPaths::GenericDataLocation))
+        .arg(pid);
 #endif
 }
 
@@ -50,9 +82,30 @@ inline QString getIpcProcessUrl(int pid) {
 #ifdef Q_OS_WIN
     return QString("%1_%2").arg(IPC_SERVICE_URL).arg(pid);
 #else
-    return QString("/tmp/%1_%2").arg(IPC_SERVICE_URL).arg(pid);
+    return "local:" + getIpcProcessPath(pid);
 #endif
 }
+
+#if !defined(Q_OS_WIN)
+#include <sys/socket.h>
+#include <sys/un.h>
+#include <unistd.h>
+
+// Returns true if the peer of the given AF_UNIX socket is allowed to talk to
+// the privileged service. Policy: only root-owned peers are trusted. The
+// desktop client reaches the service through a small setuid-root relay, so
+// even when started by an unprivileged user its peer euid is 0; any other
+// local process connecting directly without privileges is rejected.
+inline bool peerCredentialsAllowed(int socketFd)
+{
+    struct ucred cred;
+    socklen_t len = sizeof(cred);
+    if (getsockopt(socketFd, SOL_SOCKET, SO_PEERCRED, &cred, &len) != 0) {
+        return false;
+    }
+    return cred.uid == 0 && cred.gid == 0;
+}
+#endif
 
 inline QStringList sanitizeArguments(PermittedProcess proc, const QStringList &args) {
     using Validator = std::function<bool(const QString&)>;
