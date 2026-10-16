@@ -7,6 +7,7 @@
 #include "core/protocols/protocolUtils.h"
 #include "core/utils/constants/configKeys.h"
 #include "core/utils/constants/protocolConstants.h"
+#include "core/utils/utilities.h"
 #include "core/utils/selfhosted/sshSession.h"
 #include "core/models/protocols/torProtocolConfig.h"
 
@@ -34,6 +35,11 @@ ErrorCode TorInstaller::extractConfigFromContainer(DockerContainer container, co
     };
 
     QString containerName = ContainerUtils::containerToString(container);
+    // Never interpolate unvalidated strings into remote shell commands.
+    if (!Utils::isSafeShellToken(containerName)) {
+        errorCode = ErrorCode::InternalError;
+        return stdOut;
+    }
     QString script = QString("sudo docker exec -i %1 sh -c 'cat /var/lib/tor/hidden_service/hostname'").arg(containerName);
 
     errorCode = sshSession->runScript(credentials, script, cbReadStdOut, cbReadStdErr);

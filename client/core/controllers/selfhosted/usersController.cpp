@@ -117,7 +117,13 @@ ErrorCode UsersController::wgShow(const DockerContainer container, const ServerC
     QString showBin = (container == DockerContainer::Awg2)
                        ? QStringLiteral("awg")
                        : QStringLiteral("wg");
-    const QString command = QString("sudo docker exec -i $CONTAINER_NAME bash -c '%1 show all'").arg(showBin);
+    // Defense in depth: the binary name is a compile-time constant, but never
+    // interpolate anything into a remote shell command without validation.
+    if (!Utils::isSafeShellToken(showBin)) {
+        logger.error() << "Invalid wg show binary name";
+        return ErrorCode::InternalError;
+    }
+    const QString command = QString("sudo docker exec -i $CONTAINER_NAME sh -c '%1 show all'").arg(showBin);
 
     QString script = sshSession->replaceVars(command, amnezia::genBaseVars(credentials, container, QString(), QString()));
     error = sshSession->runScript(credentials, script, cbReadStdOut);

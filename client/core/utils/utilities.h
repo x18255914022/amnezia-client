@@ -22,6 +22,12 @@ public:
     // command (client/certificate ids, container names, etc.). Only characters
     // that are safe inside single-quoted shell strings and paths are allowed.
     static bool isSafeShellToken(const QString &value);
+
+    // Escapes a value so it can be safely embedded inside a single-quoted
+    // POSIX shell string.  The result includes the surrounding quotes.
+    // Unlike isSafeShellToken(), this never rejects data: any character
+    // (including newlines and backslashes) is handled correctly.
+    static QString shellQuote(const QString &value);
     static QString VerifyJsonString(const QString &source);
     static QString JsonToString(const QJsonObject &json, QJsonDocument::JsonFormat format);
     static QString JsonToString(const QJsonArray &array, QJsonDocument::JsonFormat format);

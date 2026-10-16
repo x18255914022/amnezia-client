@@ -47,6 +47,11 @@ ErrorCode SftpInstaller::extractConfigFromContainer(DockerContainer container, c
     };
 
     QString containerName = ContainerUtils::containerToString(container);
+    // Never interpolate unvalidated strings into remote shell commands.
+    if (!Utils::isSafeShellToken(containerName)) {
+        errorCode = ErrorCode::InternalError;
+        return stdOut;
+    }
     QString script = QString("sudo docker inspect --format '{{.Config.Cmd}}' %1").arg(containerName);
 
     errorCode = sshSession->runScript(credentials, script, cbReadStdOut, cbReadStdErr);

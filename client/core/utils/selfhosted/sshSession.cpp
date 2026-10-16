@@ -1,4 +1,5 @@
 #include "sshSession.h"
+#include <algorithm>
 
 #include <QCryptographicHash>
 #include <QDir>
@@ -9,6 +10,7 @@
 #include <QJsonObject>
 #include <QLoggingCategory>
 #include <QPointer>
+#include <QRegularExpression>
 #include <QTemporaryFile>
 #include <QThread>
 #include <QTimer>
@@ -124,6 +126,27 @@ ErrorCode SshSession::uploadTextFileToContainer(DockerContainer container, const
                                                 const QString &path, libssh::ScpOverwriteMode overwriteMode)
 {
     ErrorCode e = ErrorCode::NoError;
+
+    // The destination path is interpolated into remote shell commands below.
+    // Reject anything that could break out of those commands (injection
+    // defense in depth); legitimate paths are plain absolute POSIX paths.
+    auto isValidRemotePath = [](const QString &p) {
+        if (p.isEmpty() || !p.startsWith(QLatin1Char('/'))) {
+            return false;
+        }
+        static const QRegularExpression re(QStringLiteral("^/[A-Za-z0-9_.:/-]+$"));
+        if (!re.match(p).hasMatch()) {
+            return false;
+        }
+        if (p.contains(QStringLiteral(".."))) {
+            return false;
+        }
+        return true;
+    };
+    if (!isValidRemotePath(path)) {
+        return ErrorCode::InternalError;
+    }
+
     QString tmpFileName = QString("/tmp/%1.tmp").arg(Utils::getRandomString(16));
     e = uploadFileToHost(credentials, file.toUtf8(), tmpFileName);
     if (e)
@@ -236,11 +259,56 @@ QString SshSession::checkSshConnection(const ServerCredentials &credentials, Err
 
 QString SshSession::replaceVars(const QString &script, const Vars &vars)
 {
-    QString s = script;
-    for (const QPair<QString, QString> &var : vars) {
-        s.replace(var.first, var.second);
+    // Safe variable substitution for remote shell scripts.
+    //
+    // Previous implementation did a plain substring replace, which allowed an
+    // injection of the form `$X${Y}` + var X = "foo$(cmd)" to re-expand into
+    // executable shell code during a later pass (template-injection /
+    // re-substitution).  This version performs a single left-to-right scan:
+    // each placeholder is matched against the known variable names (longest
+    // first), and the substituted value is never rescanned.  Text that looks
+    // like a placeholder but isn't one is emitted verbatim.
+    if (vars.isEmpty()) {
+        return script;
     }
-    return s;
+
+    // Sort keys by descending length so $CONTAINER_NAME beats $CONTAINER etc.
+    QVector<QPair<QString, QString>> ordered;
+    ordered.reserve(vars.size());
+    for (const auto &var : vars) {
+        if (var.first.isEmpty()) {
+            continue;
+        }
+        ordered.append(var);
+    }
+    std::sort(ordered.begin(), ordered.end(),
+              [](const QPair<QString, QString> &a, const QPair<QString, QString> &b) {
+                  return a.first.size() > b.first.size();
+              });
+
+    QString result;
+    result.reserve(script.size());
+
+    int i = 0;
+    while (i < script.size()) {
+        bool replaced = false;
+        if (script.at(i) == QLatin1Char('$')) {
+            for (const auto &var : ordered) {
+                if (script.compare(i, var.first.size(), var.first, Qt::CaseSensitive) == 0) {
+                    result += var.second;
+                    i += var.first.size();
+                    replaced = true;
+                    break;
+                }
+            }
+        }
+        if (!replaced) {
+            result += script.at(i);
+            ++i;
+        }
+    }
+
+    return result;
 }
 
 ErrorCode SshSession::getDecryptedPrivateKey(const ServerCredentials &credentials, QString &decryptedPrivateKey,
